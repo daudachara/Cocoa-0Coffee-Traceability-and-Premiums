@@ -303,3 +303,91 @@
 
 (define-read-only (get-escrow-info (escrow-id uint))
   (map-get? escrows escrow-id))
+
+
+(define-data-var next-batch-id uint u1)
+
+(define-map batches uint {
+  crop-type: (string-ascii 20),
+  total-quantity: uint,
+  status: (string-ascii 20),
+  created-at: uint
+})
+
+(define-map batch-contributions uint (list 20 {
+  lot-id: uint,
+  farmer: principal,
+  quantity: uint,
+  quality-grade: uint,
+  weight-percentage: uint
+}))
+
+(define-private (calculate-weight-percentage (quantity uint) (total uint))
+  (/ (* quantity u10000) total))
+
+(define-public (create-cooperative-batch 
+  (lot-ids (list 20 uint)))
+  (let ((batch-id (var-get next-batch-id)))
+    (match (fold check-and-accumulate-lots lot-ids 
+            (some {total: u0, crop: "", valid: true}))
+      accumulator
+      (if (get valid accumulator)
+          (begin
+            (map-set batches batch-id {
+              crop-type: (get crop accumulator),
+              total-quantity: (get total accumulator),
+              status: "pooling",
+              created-at: stacks-block-height
+            })
+            (map-set batch-contributions batch-id 
+              (unwrap-panic (build-contributions lot-ids (get total accumulator))))
+            (var-set next-batch-id (+ batch-id u1))
+            (ok batch-id))
+          err-unauthorized)
+      err-invalid-quality)))
+
+(define-private (check-and-accumulate-lots (lot-id uint) 
+  (acc (optional {total: uint, crop: (string-ascii 20), valid: bool})))
+  (match acc
+    data
+    (match (map-get? lots lot-id)
+      lot (if (and (is-eq (get status lot) "available")
+                   (or (is-eq (get crop data) "") 
+                       (is-eq (get crop data) (get crop-type lot))))
+              (some {
+                total: (+ (get total data) (get quantity lot)),
+                crop: (get crop-type lot),
+                valid: true
+              })
+              (some (merge data {valid: false})))
+      (some (merge data {valid: false})))
+    none))
+
+(define-private (build-contributions (lot-ids (list 20 uint)) (total uint))
+  (ok (fold build-contribution-item lot-ids (list))))
+
+(define-private (build-contribution-item (lot-id uint) (contributions (list 20 {
+  lot-id: uint,
+  farmer: principal,
+  quantity: uint,
+  quality-grade: uint,
+  weight-percentage: uint
+})))
+  (let ((lot (unwrap-panic (map-get? lots lot-id))))
+    (match (as-max-len? 
+      (append contributions {
+        lot-id: lot-id,
+        farmer: (get farmer lot),
+        quantity: (get quantity lot),
+        quality-grade: (get quality-grade lot),
+        weight-percentage: (calculate-weight-percentage (get quantity lot) (var-get next-batch-id))
+      })
+      u20)
+      result result
+      contributions)))
+
+(define-read-only (get-batch-info (batch-id uint))
+  (map-get? batches batch-id))
+
+(define-read-only (get-batch-contributions (batch-id uint))
+  (map-get? batch-contributions batch-id))
